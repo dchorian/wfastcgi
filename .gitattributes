@@ -1,0 +1,5 @@
+PKG-INFO text
+*.py text
+*.txt text
+*.rst text
+*.cfg text
