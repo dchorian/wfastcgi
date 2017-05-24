@@ -24,6 +24,8 @@ import os
 import re
 import struct
 import sys
+import threading
+import time
 import traceback
 from xml.dom import minidom
 
@@ -520,6 +522,10 @@ def start_file_watcher(path, restart_regex):
         # restart regex set to empty string, no restart behavior
         return
     
+    shutdown_manager = _QuiescenceWaiter(
+        min_quiescence=float(os.environ.get('WFASTCGI_MIN_QUIESCENCE', 2)),
+    )
+    
     def enum_changes(path):
         """Returns a generator that blocks until a change occurs, then yields
         the filename of the changed file.
@@ -583,13 +589,37 @@ def start_file_watcher(path, restart_regex):
         for filename in enum_changes(path):
             if not filename:
                 log('wfastcgi.py exiting because the buffer was full')
-                shutdown_gracefully()
+                shutdown_manager.poke()
             elif restart.match(filename):
                 log('wfastcgi.py exiting because %s has changed, matching %s' % (filename, restart_regex))
-                shutdown_gracefully()
+                shutdown_manager.poke()
 
     restart = re.compile(restart_regex)
     start_new_thread(watcher, (path, restart))
+
+class _QuiescenceWaiter(object):
+    def __init__(self, *, interval=1, min_quiescence=2):
+        super().__init__()
+        self._timer = threading.Timer(interval, self._shutdown_if_quiescent)
+        self._last_time = None
+        self.min_quiescence = min_quiescence
+    
+    def _shutdown_if_quiescent(self, ):
+        if self._last_time + self.min_quiescence < time.time():
+            shutdown_gracefully()
+    
+    def poke(self, ):
+        """Called to note the activity that should trigger a shutdown
+        
+        This function both notes the activity and resets the quiescent period
+        for another :attr:`.min_quiescence` seconds.
+        
+        At least :attr:`.min_quiescence` seconds after the latest call to
+        this method, this object will call :func:`shutdown_gracefully`.
+        """
+        self._last_time = time.time()
+        if not self._timer.is_alive():
+            self._timer.start()
 
 def get_wsgi_handler(handler_name):
     if not handler_name:
