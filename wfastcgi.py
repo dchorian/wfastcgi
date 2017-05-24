@@ -109,7 +109,15 @@ class FastCgiRecord(object):
 #   unsigned char paddingData[paddingLength];
 #} FCGI_Record;
 
-class _ExitException(Exception):
+END_REQUEST_BODY = struct.Struct('>LBxxx')
+
+class _EndRequestException(Exception):
+    pass
+
+class _ExitException(_EndRequestException):
+    pass
+
+class _ApplicationOverloadedException(_EndRequestException):
     pass
 
 if sys.version_info[0] >= 3:
@@ -499,6 +507,12 @@ def on_exit(task):
             start_new_thread(_wait_for_exit, ())
     _ON_EXIT_TASKS.append(task)
 
+_process_more = True
+
+def shutdown_gracefully():
+    global _process_more
+    _process_more = False
+
 def start_file_watcher(path, restart_regex):
     if restart_regex is None:
         restart_regex = ".*((\\.py)|(\\.config))$"
@@ -569,14 +583,10 @@ def start_file_watcher(path, restart_regex):
         for filename in enum_changes(path):
             if not filename:
                 log('wfastcgi.py exiting because the buffer was full')
-                run_exit_tasks()
-                ExitProcess(0)
+                shutdown_gracefully()
             elif restart.match(filename):
                 log('wfastcgi.py exiting because %s has changed, matching %s' % (filename, restart_regex))
-                # we call ExitProcess directly to quickly shutdown the whole process
-                # because sys.exit(0) won't have an effect on the main thread.
-                run_exit_tasks()
-                ExitProcess(0)
+                shutdown_gracefully()
 
     restart = re.compile(restart_regex)
     start_new_thread(watcher, (path, restart))
@@ -688,8 +698,13 @@ class handle_response(object):
         return self
 
     def __exit__(self, exc_type, exc_value, exc_tb):
+        protocol_status = FCGI_REQUEST_COMPLETE
+        
         # Send any error message on FCGI_STDERR.
-        if exc_type and exc_type is not _ExitException:
+        if isinstance(exc_value, _EndRequestException):
+            if isinstance(exc_value, _ApplicationOverloadedException):
+                protocol_status = FCGI_OVERLOADED
+        else:
             error_msg = "%s:\n\n%s\n\nStdOut: %s\n\nStdErr: %s" % (
                 self.error_message or 'Error occurred',
                 ''.join(traceback.format_exception(exc_type, exc_value, exc_tb)),
@@ -704,8 +719,10 @@ class handle_response(object):
             # error.
             maybe_log(error_msg)
 
+        end_request_body = END_REQUEST_BODY.pack(0, protocol_status)
+        
         # End the request. This has to run in both success and failure cases.
-        self.send(FCGI_END_REQUEST, zero_bytes(8), streaming=False)
+        self.send(FCGI_END_REQUEST, end_request_body, streaming=False)
         
         # Remove the request from our global dict
         del _REQUESTS[self.record.req_id]
@@ -770,7 +787,7 @@ def main():
         except ImportError:
             pass
 
-        while True:
+        while _process_more:
             record = read_fastcgi_record(fcgi_stream)
             if not record:
                 continue
@@ -779,6 +796,16 @@ def main():
             output = sys.stdout = sys.__stdout__ = StringIO()
 
             with handle_response(fcgi_stream, record, output.getvalue, errors.getvalue) as response:
+
+                # While waiting for the FastCGI records of a request to arrive,
+                # a condition (e.g. a change to the source files) may have
+                # been detected that should prevent this instance from
+                # processing the request.  The best available option is to
+                # reject the request with an indication that this FastCGI
+                # process is "overloaded."
+                if not _process_more:
+                    raise _ApplicationOverloadedException()
+
                 if not initialized:
                     log('wfastcgi.py %s initializing' % __version__)
 
