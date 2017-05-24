@@ -113,6 +113,10 @@ class FastCgiRecord(object):
 
 END_REQUEST_BODY = struct.Struct('>LBxxx')
 
+
+# Set this to a logging.Logger (or similar) object to get output about events
+logger = None
+
 class _EndRequestException(Exception):
     pass
 
@@ -606,6 +610,8 @@ class _QuiescenceWaiter(object):
     
     def _shutdown_if_quiescent(self, ):
         if self._last_time + self.min_quiescence < time.time():
+            if logger is not None:
+                logger.info('Quiescent period elapsed; initiating graceful shutdown')
             shutdown_gracefully()
     
     def poke(self, ):
@@ -620,6 +626,8 @@ class _QuiescenceWaiter(object):
         self._last_time = time.time()
         if not self._timer.is_alive():
             self._timer.start()
+            if logger is not None:
+                logger.info('Starting wait for quiescence')
 
 def get_wsgi_handler(handler_name):
     if not handler_name:
@@ -834,6 +842,8 @@ def main():
                 # reject the request with an indication that this FastCGI
                 # process is "overloaded."
                 if not _process_more:
+                    if logger is not None:
+                        logger.info('Abandoning request with FCGI_OVERLOADED response')
                     raise _ApplicationOverloadedException()
 
                 if not initialized:
@@ -909,6 +919,9 @@ def main():
                 finally:
                     if hasattr(result, 'close'):
                         result.close()
+        
+        if not _process_more and logger is not None:
+            logger.info('Graceful shutdown')
     except _ExitException:
         pass
     except Exception:
