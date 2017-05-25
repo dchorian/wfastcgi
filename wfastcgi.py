@@ -376,6 +376,11 @@ def maybe_log(txt):
     except:
         pass
 
+def pylog(*args, level='INFO', **kwargs):
+    lognode = globals().get('logger')
+    if lognode is not None:
+        lognode.log(level, *args, **kwargs)
+
 def send_response(stream, req_id, resp_type, content, streaming=True):
     """sends a response w/ the given id, type, and content to the server.
     If the content is streaming then an empty record is sent at the end to 
@@ -602,16 +607,14 @@ def start_file_watcher(path, restart_regex):
     start_new_thread(watcher, (path, restart))
 
 class _QuiescenceWaiter(object):
-    def __init__(self, *, interval=1, min_quiescence=2):
+    def __init__(self, *, min_quiescence=2):
         super().__init__()
-        self._timer = threading.Timer(interval, self._shutdown_if_quiescent)
         self._last_time = None
         self.min_quiescence = min_quiescence
     
     def _shutdown_if_quiescent(self, ):
         if self._last_time + self.min_quiescence < time.time():
-            if logger is not None:
-                logger.info('Quiescent period elapsed; initiating graceful shutdown')
+            pylog('Quiescent period elapsed; initiating graceful shutdown')
             shutdown_gracefully()
     
     def poke(self, ):
@@ -623,11 +626,12 @@ class _QuiescenceWaiter(object):
         At least :attr:`.min_quiescence` seconds after the latest call to
         this method, this object will call :func:`shutdown_gracefully`.
         """
+        if self._last_time is None:
+            pylog('Starting wait for quiescence')
         self._last_time = time.time()
-        if not self._timer.is_alive():
-            self._timer.start()
-            if logger is not None:
-                logger.info('Starting wait for quiescence')
+        timer = threading.Timer(self.min_quiescence, self._shutdown_if_quiescent)
+        timer.daemon = True
+        timer.start()
 
 def get_wsgi_handler(handler_name):
     if not handler_name:
@@ -842,8 +846,7 @@ def main():
                 # reject the request with an indication that this FastCGI
                 # process is "overloaded."
                 if not _process_more:
-                    if logger is not None:
-                        logger.info('Abandoning request with FCGI_OVERLOADED response')
+                    pylog('Abandoning request with FCGI_OVERLOADED response')
                     raise _ApplicationOverloadedException()
 
                 if not initialized:
@@ -920,8 +923,8 @@ def main():
                     if hasattr(result, 'close'):
                         result.close()
         
-        if not _process_more and logger is not None:
-            logger.info('Graceful shutdown')
+        if not _process_more:
+            pylog('Graceful shutdown')
     except _ExitException:
         pass
     except Exception:
