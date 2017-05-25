@@ -701,7 +701,10 @@ class handle_response(object):
         protocol_status = FCGI_REQUEST_COMPLETE
         
         # Send any error message on FCGI_STDERR.
-        if exc_type and not isinstance(exc_value, _EndRequestException):
+        if isinstance(exc_value, _EndRequestException):
+            if isinstance(exc_value, _ApplicationOverloadedException):
+                protocol_status = FCGI_OVERLOADED
+        elif exc_value:
             error_msg = "%s:\n\n%s\n\nStdOut: %s\n\nStdErr: %s" % (
                 self.error_message or 'Error occurred',
                 ''.join(traceback.format_exception(exc_type, exc_value, exc_tb)),
@@ -793,6 +796,16 @@ def main():
             output = sys.stdout = sys.__stdout__ = StringIO()
 
             with handle_response(fcgi_stream, record, output.getvalue, errors.getvalue) as response:
+
+                # While waiting for the FastCGI records of a request to arrive,
+                # a condition (e.g. a change to the source files) may have
+                # been detected that should prevent this instance from
+                # processing the request.  The best available option is to
+                # reject the request with an indication that this FastCGI
+                # process is "overloaded."
+                if not _process_more:
+                    raise _ApplicationOverloadedException()
+
                 if not initialized:
                     log('wfastcgi.py %s initializing' % __version__)
 
