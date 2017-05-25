@@ -20,6 +20,7 @@ __version__ = "3.0.0"
 
 import ctypes
 import datetime
+import logging
 import os
 import re
 import struct
@@ -376,7 +377,7 @@ def maybe_log(txt):
     except:
         pass
 
-def pylog(*args, level='INFO', **kwargs):
+def pylog(*args, level=logging.INFO, **kwargs):
     lognode = globals().get('logger')
     if lognode is not None:
         lognode.log(level, *args, **kwargs)
@@ -740,12 +741,12 @@ class handle_response(object):
         return self
 
     def __exit__(self, exc_type, exc_value, exc_tb):
-        protocol_status = FCGI_REQUEST_COMPLETE
-        
         # Send any error message on FCGI_STDERR.
         if isinstance(exc_value, _EndRequestException):
             if isinstance(exc_value, _ApplicationOverloadedException):
-                protocol_status = FCGI_OVERLOADED
+                send_response(self.stream, self.record.req_id, FCGI_END_REQUEST,
+                    END_REQUEST_BODY.pack(0, FCGI_OVERLOADED), False)
+                return True
         elif exc_value:
             error_msg = "%s:\n\n%s\n\nStdOut: %s\n\nStdErr: %s" % (
                 self.error_message or 'Error occurred',
@@ -761,7 +762,7 @@ class handle_response(object):
             # error.
             maybe_log(error_msg)
 
-        end_request_body = END_REQUEST_BODY.pack(0, protocol_status)
+        end_request_body = END_REQUEST_BODY.pack(0, FCGI_REQUEST_COMPLETE)
         
         # End the request. This has to run in both success and failure cases.
         self.send(FCGI_END_REQUEST, end_request_body, streaming=False)
@@ -770,7 +771,7 @@ class handle_response(object):
         del _REQUESTS[self.record.req_id]
         
         # Suppress all exceptions unless requested
-        return not self.fatal_errors
+        return not self.fatal_errors and not isinstance(exc_value, _ExitException)
 
     @staticmethod
     def _decode_header(key, value):
@@ -829,7 +830,7 @@ def main():
         except ImportError:
             pass
 
-        while _process_more:
+        while True:
             record = read_fastcgi_record(fcgi_stream)
             if not record:
                 continue
@@ -922,9 +923,10 @@ def main():
                 finally:
                     if hasattr(result, 'close'):
                         result.close()
-        
-        if not _process_more:
-            pylog('Graceful shutdown')
+
+            if not _process_more:
+                pylog('Graceful shutdown')
+                break
     except _ExitException:
         pass
     except Exception:
