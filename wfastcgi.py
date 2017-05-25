@@ -742,7 +742,7 @@ class handle_response(object):
         if isinstance(exc_value, _EndRequestException):
             if isinstance(exc_value, _ApplicationOverloadedException):
                 protocol_status = FCGI_OVERLOADED
-        else:
+        elif exc_type:
             error_msg = "%s:\n\n%s\n\nStdOut: %s\n\nStdErr: %s" % (
                 self.error_message or 'Error occurred',
                 ''.join(traceback.format_exception(exc_type, exc_value, exc_tb)),
