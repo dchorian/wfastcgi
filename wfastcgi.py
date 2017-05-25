@@ -695,7 +695,7 @@ class handle_response(object):
 
     def __exit__(self, exc_type, exc_value, exc_tb):
         # Send any error message on FCGI_STDERR.
-        if not isinstance(exc_value, _EndRequestException):
+        if exc_type and not isinstance(exc_value, _EndRequestException):
             error_msg = "%s:\n\n%s\n\nStdOut: %s\n\nStdErr: %s" % (
                 self.error_message or 'Error occurred',
                 ''.join(traceback.format_exception(exc_type, exc_value, exc_tb)),
