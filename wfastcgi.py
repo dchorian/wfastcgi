@@ -109,7 +109,13 @@ class FastCgiRecord(object):
 #   unsigned char paddingData[paddingLength];
 #} FCGI_Record;
 
-class _ExitException(Exception):
+class _EndRequestException(Exception):
+    pass
+
+class _ExitException(_EndRequestException):
+    pass
+
+class _ApplicationOverloadedException(_EndRequestException):
     pass
 
 if sys.version_info[0] >= 3:
@@ -689,7 +695,7 @@ class handle_response(object):
 
     def __exit__(self, exc_type, exc_value, exc_tb):
         # Send any error message on FCGI_STDERR.
-        if exc_type and exc_type is not _ExitException:
+        if not isinstance(exc_value, _EndRequestException):
             error_msg = "%s:\n\n%s\n\nStdOut: %s\n\nStdErr: %s" % (
                 self.error_message or 'Error occurred',
                 ''.join(traceback.format_exception(exc_type, exc_value, exc_tb)),
