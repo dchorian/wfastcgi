@@ -378,7 +378,13 @@ def maybe_log(txt):
         pass
 
 def pylog(*args, level=logging.INFO, **kwargs):
-    lognode = globals().get('logger')
+    # This module is often run as __main__, so other modules don't get to
+    # set the `logger` attribute on it, but set it on the version imported
+    # as `wfastcgi`; therefore, make use of that same module object for
+    # referencing the configured logger:
+    import wfastcgi
+    lognode = wfastcgi.logger
+    
     if lognode is not None:
         lognode.log(level, *args, **kwargs)
 
@@ -747,6 +753,7 @@ class handle_response(object):
         if isinstance(exc_value, _EndRequestException):
             if isinstance(exc_value, _ApplicationOverloadedException):
                 protocol_status = FCGI_OVERLOADED
+                pylog('Responding with FCGI_OVERLOADED')
         elif exc_value:
             error_msg = "%s:\n\n%s\n\nStdOut: %s\n\nStdErr: %s" % (
                 self.error_message or 'Error occurred',
