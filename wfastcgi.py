@@ -741,12 +741,12 @@ class handle_response(object):
         return self
 
     def __exit__(self, exc_type, exc_value, exc_tb):
+        protocol_status = FCGI_REQUEST_COMPLETE
+
         # Send any error message on FCGI_STDERR.
         if isinstance(exc_value, _EndRequestException):
             if isinstance(exc_value, _ApplicationOverloadedException):
-                send_response(self.stream, self.record.req_id, FCGI_END_REQUEST,
-                    END_REQUEST_BODY.pack(0, FCGI_OVERLOADED), False)
-                return True
+                protocol_status = FCGI_OVERLOADED
         elif exc_value:
             error_msg = "%s:\n\n%s\n\nStdOut: %s\n\nStdErr: %s" % (
                 self.error_message or 'Error occurred',
@@ -762,7 +762,7 @@ class handle_response(object):
             # error.
             maybe_log(error_msg)
 
-        end_request_body = END_REQUEST_BODY.pack(0, FCGI_REQUEST_COMPLETE)
+        end_request_body = END_REQUEST_BODY.pack(0, protocol_status)
         
         # End the request. This has to run in both success and failure cases.
         self.send(FCGI_END_REQUEST, end_request_body, streaming=False)
@@ -800,6 +800,9 @@ class handle_response(object):
         if headers:
             header_text += ''.join('%s: %s\r\n' % handle_response._decode_header(*i) for i in headers)
         self.header_bytes = wsgi_encode(header_text + '\r\n')
+
+        if not _process_more:
+            raise _ApplicationOverloadedException()
 
         return lambda content: self.send(FCGI_STDOUT, content)
 
@@ -839,16 +842,6 @@ def main():
             output = sys.stdout = sys.__stdout__ = StringIO()
 
             with handle_response(fcgi_stream, record, output.getvalue, errors.getvalue) as response:
-
-                # While waiting for the FastCGI records of a request to arrive,
-                # a condition (e.g. a change to the source files) may have
-                # been detected that should prevent this instance from
-                # processing the request.  The best available option is to
-                # reject the request with an indication that this FastCGI
-                # process is "overloaded."
-                if not _process_more:
-                    pylog('Abandoning request with FCGI_OVERLOADED response')
-                    raise _ApplicationOverloadedException()
 
                 if not initialized:
                     log('wfastcgi.py %s initializing' % __version__)
