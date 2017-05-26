@@ -170,9 +170,9 @@ else:
 
 def read_fastcgi_record(stream):
     """reads the main fast cgi record"""
-    data = stream.read(8)     # read record
+    data = stream.read(8, cancelable=len(_REQUESTS) == 0)     # read record
     if not data:
-        # no more data, our other process must have died...
+        # no more data: parent process dead or file change detected
         raise _ExitException()
 
     fcgi_ver, reqtype, req_id, content_size, padding_len, _ = struct.unpack('>BBHHBB', data)
@@ -525,13 +525,65 @@ def on_exit(task):
             start_new_thread(_wait_for_exit, ())
     _ON_EXIT_TASKS.append(task)
 
-_process_more = True
+class _InterruptibleStream(object):
+    def __init__(self, orig_stream):
+        super().__init__()
+        self._orig_stream = orig_stream
+        
+        self._read_thread = threading.Thread(target=self._read_in_background, daemon=True)
+        
+        self._request_sync = threading.Condition()
+        self._requested_bytes = 0
+        
+        self._result_sync = threading.Condition()
+        self._read_content = b''
+        self._cancelled = False
+        
+        self._read_thread.start()
+    
+    def read(self, size, *, cancelable=False):
+        if not cancelable:
+            return self._orig_stream.read(size)
+        
+        def completed_read():
+            return self._cancelled or self._read_content
+        
+        with self._request_sync:
+            self._requested_bytes = size
+            self._request_sync.notify()
+        
+        with self._result_sync:
+            self._result_sync.wait_for(completed_read)
+            result, self._read_content = self._read_content, b''
+            return result
+    
+    def cancel_reading(self, arg):
+        with self._result_sync:
+            self._cancelled = True
+            self._result_sync.notify()
+    
+    def _read_in_background(self, ):
+        def read_requested():
+            return self._requested_bytes > 0
+        
+        while True:
+            with self._request_sync:
+                self._request_sync.wait_for(read_requested)
+                bytes_to_read, self._requested_bytes = self._requested_bytes, 0
+            
+            read_result = self._orig_stream.read(bytes_to_read)
+            
+            with self._result_sync:
+                self._read_content = read_result
+                self._result_sync.notify()
+    
+    def write(self, data):
+        return self._orig_stream.write(data)
+    
+    def flush(self, ):
+        return self._orig_stream.flush()
 
-def shutdown_gracefully():
-    global _process_more
-    _process_more = False
-
-def start_file_watcher(path, restart_regex):
+def start_file_watcher(path, restart_regex, shutdown):
     if restart_regex is None:
         restart_regex = ".*((\\.py)|(\\.config))$"
     elif not restart_regex:
@@ -539,6 +591,7 @@ def start_file_watcher(path, restart_regex):
         return
     
     shutdown_manager = _QuiescenceWaiter(
+        shutdown,
         min_quiescence=float(os.environ.get('WFASTCGI_MIN_QUIESCENCE', 2)),
     )
     
@@ -614,15 +667,16 @@ def start_file_watcher(path, restart_regex):
     start_new_thread(watcher, (path, restart))
 
 class _QuiescenceWaiter(object):
-    def __init__(self, *, min_quiescence=2):
+    def __init__(self, shutdown, *, min_quiescence=2):
         super().__init__()
         self._last_time = None
+        self.shutdown = shutdown
         self.min_quiescence = min_quiescence
     
     def _shutdown_if_quiescent(self, ):
         if self._last_time + self.min_quiescence < time.time():
             pylog('Quiescent period elapsed; initiating graceful shutdown')
-            shutdown_gracefully()
+            self.shutdown()
     
     def poke(self, ):
         """Called to note the activity that should trigger a shutdown
@@ -631,7 +685,7 @@ class _QuiescenceWaiter(object):
         for another :attr:`.min_quiescence` seconds.
         
         At least :attr:`.min_quiescence` seconds after the latest call to
-        this method, this object will call :func:`shutdown_gracefully`.
+        this method, this object will call :attr:`.shutdown`.
         """
         if self._last_time is None:
             pylog('Starting wait for quiescence')
@@ -808,9 +862,6 @@ class handle_response(object):
             header_text += ''.join('%s: %s\r\n' % handle_response._decode_header(*i) for i in headers)
         self.header_bytes = wsgi_encode(header_text + '\r\n')
 
-        if not _process_more:
-            raise _ApplicationOverloadedException()
-
         return lambda content: self.send(FCGI_STDOUT, content)
 
     def send(self, resp_type, content, streaming=True):
@@ -833,12 +884,7 @@ def main():
     log('Python version: %s' % sys.version)
 
     try:
-        fcgi_stream = sys.stdin.detach() if sys.version_info[0] >= 3 else sys.stdin
-        try:
-            import msvcrt
-            msvcrt.setmode(fcgi_stream.fileno(), os.O_BINARY)
-        except ImportError:
-            pass
+        fcgi_stream = _InterruptibleStream(os.fdopen(0, 'rb+'))
 
         while True:
             record = read_fastcgi_record(fcgi_stream)
@@ -862,7 +908,7 @@ def main():
                     env, handler = read_wsgi_handler(response.physical_path)
 
                     response.error_message = 'Error occurred starting file watcher'
-                    start_file_watcher(response.physical_path, env.get('WSGI_RESTART_FILE_REGEX'))
+                    start_file_watcher(response.physical_path, env.get('WSGI_RESTART_FILE_REGEX'), fcgi_stream.cancel_reading)
 
                     # Enable debugging if possible. Default to local-only, but
                     # allow a web.config to override where we listen
@@ -924,9 +970,6 @@ def main():
                     if hasattr(result, 'close'):
                         result.close()
 
-            if not _process_more:
-                pylog('Graceful shutdown')
-                break
     except _ExitException:
         pass
     except Exception:
