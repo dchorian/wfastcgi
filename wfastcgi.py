@@ -557,7 +557,7 @@ class _InterruptibleStream(object):
             result, self._read_content = self._read_content, b''
             return result
     
-    def cancel_reading(self, arg):
+    def cancel_reading(self, ):
         with self._result_sync:
             self._cancelled = True
             self._result_sync.notify()
