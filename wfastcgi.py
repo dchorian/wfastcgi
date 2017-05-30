@@ -671,12 +671,17 @@ def start_file_watcher(path, restart_regex, shutdown):
 class _QuiescenceWaiter(object):
     def __init__(self, shutdown, *, min_quiescence=2):
         super().__init__()
-        self._last_time = None
+        self._lock = threading.Lock()
+        self._last_time = 0
         self.shutdown = shutdown
         self.min_quiescence = min_quiescence
     
     def _shutdown_if_quiescent(self, ):
-        if self._last_time + self.min_quiescence < time.time():
+        with self._lock:
+            run_now = self._last_time + self.min_quiescence <= time.time()
+            if run_now:
+                self._last_time = float('Inf')
+        if run_now:
             pylog('Quiescent period elapsed; initiating graceful shutdown')
             self.shutdown()
     
@@ -689,10 +694,12 @@ class _QuiescenceWaiter(object):
         At least :attr:`.min_quiescence` seconds after the latest call to
         this method, this object will call :attr:`.shutdown`.
         """
-        if self._last_time is None:
+        with self._lock:
+            prev_last_time = self._last_time
+            self._last_time = min(self._last_time, time.time())
+        if not prev_last_time:
             pylog('Starting wait for quiescence')
-        self._last_time = time.time()
-        timer = threading.Timer(self.min_quiescence, self._shutdown_if_quiescent)
+        timer = threading.Timer(self.min_quiescence + 0.1, self._shutdown_if_quiescent)
         timer.daemon = True
         timer.start()
 
