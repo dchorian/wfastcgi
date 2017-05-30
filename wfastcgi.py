@@ -411,7 +411,7 @@ def send_response(stream, req_id, resp_type, content, streaming=True):
 
         offset += len_remaining
 
-        os.write(stream.fileno(), data)
+        stream.write(data)
         if len_remaining == 0 or not streaming:
             break
     stream.flush()
@@ -575,6 +575,8 @@ class _InterruptibleStream(object):
             
             with self._result_sync:
                 self._read_content = read_result
+                if len(read_result) == 0:
+                    self._cancelled = True
                 self._result_sync.notify()
     
     def write(self, data):
